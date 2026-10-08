@@ -113,7 +113,7 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 egui::ScrollArea::vertical().max_height(460.0).auto_shrink([false, true]).show(ui, |ui| {
                     egui::Grid::new("props").num_columns(2).spacing([18.0, 8.0]).min_col_width(140.0).show(ui, |ui| match tab {
                         PropsTab::Description => {
-                            row(ui, "File", doc.name.clone());
+                            row(ui, "File", crate::bidi::visual(&doc.name).into_owned());
                             match app.props_draft.as_mut() {
                                 Some((_, draft)) if doc.allows_modification() => {
                                     for (k, v) in INFO_KEYS.iter().zip(draft.iter_mut()) {
@@ -322,7 +322,7 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
                         }
                         PropsTab::Advanced => {
                             row(ui, "PDF version", i.pdf_version.clone());
-                            row(ui, "Location", doc.path.clone().unwrap_or_default());
+                            row(ui, "Location", crate::bidi::visual(doc.path.as_deref().unwrap_or_default()).into_owned());
                             row(ui, "File size", format!("{} ({} bytes)", human_size(i.file_size), i.file_size));
                             let p = &i.pages[0];
                             row(ui, "Page size", format!("{:.2} × {:.2} in", p.width / 72.0, p.height / 72.0));
@@ -1031,6 +1031,8 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
                     ("⇧⌘+ / ⇧⌘−", tl!("Rotate view")),
                     ("Home / End", tl!("First / last page")),
                     ("← / →, ⌘← / ⌘→", tl!("Previous / next page")),
+                    ("V", tl!("Select (V)")),
+                    ("H / Space (hold)", tl!("Hand (H)")),
                     ("Delete", tl!("Delete selected pages (Organize)")),
                     ("⌘A", tl!("Select all pages (Organize)")),
                 ] {
@@ -1142,7 +1144,11 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
             app.discard_recovered(&keys);
         }
     }
-    if replace_now && let Some(d) = app.replace_draft.take() {
+    // The pages to replace belong to the document the dialog was opened on (#167).
+    if replace_now
+        && let Some(d) = app.replace_draft.take()
+        && app.still_pick_target(d.target)
+    {
         let n = d.to - d.from + 1;
         app.apply_edit(Edit::ReplacePages {
             pages: (d.from - 1..d.to).collect(),
@@ -1151,8 +1157,9 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
             src_pages: (d.src_from - 1..d.src_from - 1 + n).collect(),
         });
     }
-    if print_go {
-        app.print_now();
+    // A print or save that fails keeps the dialog open, with the reason in a notice.
+    if print_go && !app.print_now() {
+        close = false;
     }
     if revert_now {
         app.revert_active();
@@ -1342,7 +1349,7 @@ pub(crate) fn save_prompt_key(ctx: &egui::Context) -> Option<Option<bool>> {
 fn save_prompt(app: &mut PdfCraftApp, ctx: &egui::Context) {
     let Some(req) = app.close_request else { return };
     let index = match req {
-        CloseRequest::Tab(i) => Some(i),
+        CloseRequest::Tab(id) => app.views.iter().position(|v| v.id == id),
         CloseRequest::Quit | CloseRequest::All => app.first_dirty(),
     };
     let Some(name) = index.and_then(|i| app.views.get(i)).and_then(|v| app.session.get(v.id)).map(|d| d.name.clone()) else {

@@ -50,6 +50,7 @@ pub use link_ui::LinkDraft;
 pub use optimize_ui::{OptimizeDraft, OptimizeTab};
 pub use sign_ui::{DigitalIdEntry, SignDraft, SignStep};
 mod autoscroll;
+mod bidi;
 mod dialogs;
 mod edit_text_ui;
 mod editing;
@@ -75,6 +76,8 @@ pub mod i18n;
 pub(crate) const MAX_AUTHOR_CHARS: usize = 200;
 mod protect;
 mod recovery;
+#[cfg(not(target_arch = "wasm32"))]
+mod system_fonts;
 pub mod theme;
 pub mod updates;
 mod wheel_pager;
@@ -84,7 +87,7 @@ use pdfcraft_engine::{DocId, Session};
 
 pub use canvas::DocView;
 pub use editing::{CloseRequest, SaveTarget};
-pub use files::{ExtractDraft, FilePurpose, RotateDraft, SplitDraft, SplitMode, SplitPlan};
+pub use files::{ExtractDraft, FilePurpose, FileRequest, RotateDraft, SplitDraft, SplitMode, SplitPlan};
 pub use recovery::{AUTOSAVE_SECS, RecoveryMeta, RecoveryStore};
 use theme::{ThemeKind, ThemePreference};
 
@@ -330,6 +333,8 @@ pub struct PdfCraftApp {
     pub left_open: bool,
     pub right: Option<RightPanel>,
     pub quick_tool: QuickTool,
+    /// The tool to go back to when Space, held for a temporary Hand, is released.
+    space_hand: Option<QuickTool>,
     /// Comment author, per-tool colours and widths, pin.
     pub comment_prefs: comments::CommentPrefs,
     /// Resolved colours, including the current OS theme when following the system.
@@ -443,6 +448,13 @@ pub struct PdfCraftApp {
     last_autosave: f64,
     pending_recovered: Option<RecoveryMeta>,
     allow_quit: bool,
+    /// Shortcuts pressed while a text field had the keyboard, run on the next frame (see
+    /// `registry_shortcuts`).
+    deferred_commands: Vec<(&'static str, Option<DocId>)>,
+    /// The dialog seen at the last check, and a counter bumped whenever it changes (see
+    /// [`Self::dialog_epoch`]).
+    dialog_seen: Option<Dialog>,
+    dialog_epoch: u64,
     /// The egui context, for commands that change window or theme state.
     ctx: Option<egui::Context>,
     styled: bool,
@@ -551,6 +563,7 @@ impl PdfCraftApp {
             left_open: true,
             right: None,
             quick_tool: QuickTool::Select,
+            space_hand: None,
             comment_prefs: Default::default(),
             theme: ThemeKind::Light,
             theme_preference: ThemePreference::Light,
@@ -623,6 +636,9 @@ impl PdfCraftApp {
             last_autosave: 0.0,
             pending_recovered: None,
             allow_quit: false,
+            deferred_commands: Vec::new(),
+            dialog_seen: None,
+            dialog_epoch: 0,
             ctx: None,
             styled: false,
             fonts_ready: false,
@@ -793,6 +809,17 @@ impl PdfCraftApp {
         });
     }
 
+    /// A number that changes whenever the open dialog changes (opened, closed or replaced by
+    /// another), checked every frame. A picker started from a dialog's Browse… button answers
+    /// only into the same showing of that dialog.
+    pub(crate) fn dialog_epoch(&mut self) -> u64 {
+        if self.dialog != self.dialog_seen {
+            self.dialog_seen = self.dialog;
+            self.dialog_epoch = self.dialog_epoch.wrapping_add(1);
+        }
+        self.dialog_epoch
+    }
+
     /// Save an attachment to disk, or open a PDF attachment in a new tab.
     pub fn attachment_action(&mut self, doc: DocId, index: usize, open: bool) {
         let Some(d) = self.session.get(doc) else { return };
@@ -807,12 +834,12 @@ impl PdfCraftApp {
             }
             (Ok(bytes), false) => {
                 #[cfg(not(target_arch = "wasm32"))]
-                if let Some(path) = rfd::FileDialog::new().set_file_name(&att.name).save_file() {
-                    match std::fs::write(&path, &bytes) {
-                        Ok(()) => self.notify_fmt("Saved {name}", &[("name", &path.display().to_string())]),
-                        Err(e) => self.notify_fmt("Couldn't save: {e}", &[("e", &e.to_string())]),
+                self.ask_one(pickers::Ask::Save(rfd::AsyncFileDialog::new().set_file_name(&att.name)), None, move |app, path| {
+                    match crate::editing::write_atomically(&path.to_string_lossy(), &bytes) {
+                        Ok(()) => app.notify_fmt("Saved {name}", &[("name", &path.display().to_string())]),
+                        Err(e) => app.notify_fmt("Couldn't save: {e}", &[("e", &e.to_string())]),
                     }
-                }
+                });
                 #[cfg(target_arch = "wasm32")]
                 self.notify_fmt("Downloading attachments on the web arrives with M3.10 ({n} bytes ready)", &[("n", &bytes.len().to_string())]);
             }
@@ -865,6 +892,7 @@ impl PdfCraftApp {
         #[cfg(target_arch = "wasm32")]
         {
             let inbox = self.inbox.clone();
+            let ctx = self.ctx.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 if let Some(h) = rfd::AsyncFileDialog::new()
                     .add_filter("PDF", &["pdf"])
@@ -875,6 +903,10 @@ impl PdfCraftApp {
                     let bytes = h.read().await;
                     if let Ok(mut q) = inbox.lock() {
                         q.push((h.file_name(), bytes));
+                    }
+                    // The read may finish while the app is idle: wake it to open the file.
+                    if let Some(ctx) = ctx {
+                        ctx.request_repaint();
                     }
                 }
             });
@@ -1340,7 +1372,42 @@ impl PdfCraftApp {
             {
                 self.views[i].select_all();
             }
+            self.tool_keys(i, ctx);
             canvas::shortcuts(&mut self.views[i], ctx);
+        }
+    }
+}
+
+impl PdfCraftApp {
+    /// The quick tools' keys, as in Acrobat: V selects, H pans, and holding Space pans until it
+    /// is released. Plain letters, so not while a text field, a form field, a dialog or the
+    /// palette has the keyboard.
+    fn tool_keys(&mut self, i: usize, ctx: &egui::Context) {
+        use egui::Key;
+        let free = self.dialog.is_none() && !self.palette_open && !ctx.egui_wants_keyboard_input() && self.views[i].forms.focus.is_none();
+        let (plain, space) = ctx.input(|input| (input.modifiers.is_none(), input.key_down(Key::Space)));
+        if let Some(previous) = self.space_hand
+            && !space
+        {
+            self.space_hand = None;
+            if self.quick_tool == QuickTool::Hand {
+                self.quick_tool = previous;
+            }
+        }
+        if !free || !plain {
+            return;
+        }
+        if ctx.input(|input| input.key_pressed(Key::V)) {
+            self.quick_tool = QuickTool::Select;
+            self.space_hand = None;
+        }
+        if ctx.input(|input| input.key_pressed(Key::H)) {
+            self.quick_tool = QuickTool::Hand;
+            self.space_hand = None;
+        }
+        if space && self.space_hand.is_none() && self.quick_tool != QuickTool::Hand {
+            self.space_hand = Some(self.quick_tool);
+            self.quick_tool = QuickTool::Hand;
         }
     }
 }
@@ -1352,6 +1419,7 @@ impl eframe::App for PdfCraftApp {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ctx = Some(ctx.clone());
+        self.dialog_epoch();
         // Notices raised outside `ui` (opened files, OS events, the control channel) translate too.
         let lang = i18n::Lang::from_pref(&self.language);
         i18n::set_current(lang);
@@ -1401,6 +1469,8 @@ impl eframe::App for PdfCraftApp {
         let now = ctx.input(|i| i.time);
         self.autosave_tick(now);
         self.poll_updates();
+        // Shortcuts deferred last frame: the text field has taken that frame's typing since.
+        let deferred = std::mem::take(&mut self.deferred_commands);
         self.shortcuts(ctx);
         // Scrolling is transient: never resume after changing tabs, opening a modal/palette,
         // or returning to a window that lost focus.
@@ -1410,7 +1480,16 @@ impl eframe::App for PdfCraftApp {
                 view.auto_scroll.cancel();
             }
         }
-        self.process_pending_edits();
+        // A field that refused its value this frame keeps the shortcut from saving or printing
+        // behind the user's back; so does a save prompt opened since.
+        if self.process_pending_edits() && self.close_request.is_none() {
+            for (id, doc) in deferred {
+                // Only in the document the shortcut was pressed in.
+                if self.active_ids().map(|(_, active)| active) == doc {
+                    self.execute(id);
+                }
+            }
+        }
         self.poll_export();
         self.poll_ocr();
         self.poll_action();
@@ -1454,6 +1533,8 @@ impl eframe::App for PdfCraftApp {
                 },
             );
             dialogs::show(self, &ctx);
+            // Notices too: a refused field value or a failed save must be seen in full screen.
+            widgets::toast(self, &ctx);
             return;
         }
         chrome::tab_strip(self, ui);
