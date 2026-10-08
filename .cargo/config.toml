@@ -1,2 +1,8 @@
 [alias]
 xtask = "run -p xtask --"
+
+# Bound peak memory: this box has 7.1 GiB RAM, cargo's default is one job per core
+# (12), and a dozen rustc runs at opt-level 1/2 swap-thrash it. GitHub runners have
+# 4 vCPUs, so this matches CI.
+[build]
+jobs = 4
