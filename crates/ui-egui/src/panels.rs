@@ -686,15 +686,19 @@ struct OutlineCtx<'a> {
 /// The destination page label gets its own right-aligned column in a bookmark row; drawing
 /// tools put whole section titles in /PageLabels, so the column is bounded (#124).
 const LABEL_COLUMN_MAX: f32 = 72.0;
+/// More characters than ever fit [`LABEL_COLUMN_MAX`] at the label size.
+const LABEL_MEASURE_CHARS: usize = 64;
 
 /// The longest head of `text` that `fits`, plus an ellipsis when the whole string doesn't.
 /// Whole characters are dropped from the end, so the string is only ever cut at a char
-/// boundary, and the loop always ends (at the ellipsis alone).
+/// boundary, and the loop always ends (at the ellipsis alone). A label is document text: only
+/// its first [`LABEL_MEASURE_CHARS`] characters are measured, so a huge one can't make each
+/// frame lay out thousands of candidates.
 fn ellipsized_prefix(text: &str, mut fits: impl FnMut(&str) -> bool) -> String {
-    if fits(text) {
+    let mut s: String = text.chars().take(LABEL_MEASURE_CHARS).collect();
+    if s.len() == text.len() && fits(text) {
         return text.to_owned();
     }
-    let mut s = text.to_owned();
     loop {
         s.pop();
         let candidate = format!("{s}\u{2026}");
@@ -1005,5 +1009,18 @@ mod label_column {
     #[test]
     fn the_loop_ends_when_nothing_fits() {
         assert_eq!(ellipsized_prefix("Floor Plans", |_| false), "\u{2026}");
+    }
+
+    /// A huge label from a hostile file is measured a bounded number of times per frame.
+    #[test]
+    fn a_huge_label_is_measured_a_bounded_number_of_times() {
+        let label = "x".repeat(1_000_000);
+        let mut calls = 0;
+        let shown = ellipsized_prefix(&label, |s| {
+            calls += 1;
+            s.len() <= 12
+        });
+        assert!(calls <= super::LABEL_MEASURE_CHARS + 1, "{calls} measurements");
+        assert!(shown.ends_with('\u{2026}') && label.starts_with(shown.trim_end_matches('\u{2026}')), "{shown:?}");
     }
 }
