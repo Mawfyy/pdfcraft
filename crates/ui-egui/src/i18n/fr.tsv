@@ -1931,3 +1931,5 @@
 	Lines +/−	Lignes +/−
 	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{bin_added} / −{bin_deleted} binary assets, {first} – {last}	@{login} : {prs} PR, {commits} commits, +{added} / −{deleted} lignes (Δ {delta}), +{bin_added} / −{bin_deleted} fichiers binaires, {first} – {last}
 	Set layer visibility	Définir la visibilité des calques
+	Open Recent	Ouvrir un fichier récent
+	No recent files	Aucun fichier récent
