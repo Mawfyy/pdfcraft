@@ -1101,6 +1101,72 @@ fn fill_and_sign_through_tools() {
 }
 
 #[test]
+fn image_signatures_through_tools_preserve_transparency_and_survive_save() {
+    let dir = workdir("image-signatures");
+    let mut png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png, 120, 40);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let rgba: Vec<u8> = (0..40)
+            .flat_map(|y| (0..120).flat_map(move |x| if (40..80).contains(&x) && (10..30).contains(&y) { [0, 0, 0, 255] } else { [0, 0, 0, 0] }))
+            .collect();
+        encoder.write_header().unwrap().write_image_data(&rgba).unwrap();
+    }
+    std::fs::write(dir.join("signature.png"), png).unwrap();
+    std::fs::write(dir.join("broken.png"), b"broken").unwrap();
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_create", json!({ "from": "blank", "width": 200, "height": 300 }))["doc"].as_u64().unwrap();
+    for (kind, y) in [("signature", 60), ("initials", 120)] {
+        ok(&mut a, "fill_sign_add", json!({ "doc": doc, "page": 1, "type": kind, "at": [20, y], "path": "signature.png" }));
+    }
+    let render = |a: &mut Automation, doc| {
+        let output = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+        let Content::Png { data, .. } = &output[0] else { panic!() };
+        image::load_from_memory(data).unwrap().to_rgba8()
+    };
+    let before = render(&mut a, doc);
+    assert_eq!(before.get_pixel(25, 60).0, [255, 255, 255, 255], "transparent margin exposes the page");
+    assert_eq!(before.get_pixel(65, 60).0, [0, 0, 0, 255], "signature ink is embedded");
+    assert_eq!(ok(&mut a, "edit_undo", json!({ "doc": doc }))["undone"], "Add initials");
+    assert_eq!(ok(&mut a, "comment_list", json!({ "doc": doc }))["count"], 1);
+    ok(&mut a, "edit_redo", json!({ "doc": doc }));
+    // The same resize edit the selection handles use must keep the imported appearance.
+    for rect in [json!([20, 40, 20, 88]), json!([20, 40, 100000000, 88])] {
+        assert!(a.call("comment_edit", &json!({ "doc": doc, "page": 1, "index": 1, "rect": rect })).is_err());
+    }
+    ok(&mut a, "comment_lock", json!({ "doc": doc, "page": 1, "index": 1 }));
+    assert!(a.call("comment_edit", &json!({ "doc": doc, "page": 1, "index": 1, "rect": [20, 40, 164, 88] })).is_err());
+    ok(&mut a, "comment_lock", json!({ "doc": doc, "page": 1, "index": 1, "locked": false }));
+    assert_eq!(render(&mut a, doc), before, "invalid and locked resizes leave the image intact");
+    ok(&mut a, "comment_edit", json!({ "doc": doc, "page": 1, "index": 1, "rect": [20, 40, 164, 88] }));
+    let resized = render(&mut a, doc);
+    assert_eq!(resized.get_pixel(110, 64).0, [0, 0, 0, 255], "resizing scales the original ink");
+    assert_eq!(resized.get_pixel(25, 64).0, [255, 255, 255, 255], "resizing retains alpha");
+    assert_eq!(ok(&mut a, "edit_undo", json!({ "doc": doc }))["undone"], "Resize comment");
+    assert_eq!(render(&mut a, doc), before);
+    ok(&mut a, "edit_redo", json!({ "doc": doc }));
+    assert_eq!(render(&mut a, doc), resized);
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "signed.pdf" }));
+    let reopened = ok(&mut a, "doc_open", json!({ "path": "signed.pdf" }))["doc"].as_u64().unwrap();
+    assert_eq!(ok(&mut a, "comment_list", json!({ "doc": reopened }))["count"], 2);
+    assert_eq!(render(&mut a, reopened), resized, "resized appearances retain alpha and geometry after save");
+    for args in [
+        json!({ "type": "signature", "path": "broken.png" }),
+        json!({ "type": "signature", "path": "signature.png", "text": "Ada" }),
+        json!({ "type": "check", "path": "signature.png" }),
+        json!({ "type": "signature", "path": "../outside.png" }),
+    ] {
+        let mut args = args;
+        args["doc"] = json!(doc);
+        args["page"] = json!(1);
+        args["at"] = json!([20, 80]);
+        assert!(a.call("fill_sign_add", &args).is_err(), "{args}");
+    }
+    assert_eq!(ok(&mut a, "comment_list", json!({ "doc": doc }))["count"], 2, "errors leave the PDF intact");
+}
+
+#[test]
 fn creating_and_reducing_through_tools() {
     let dir = workdir("create");
     std::fs::write(dir.join("notes.txt"), "Meeting notes\nAction items").unwrap();
@@ -2347,5 +2413,114 @@ mod close_argument_tests {
         assert!(a.session().get(pdfcraft_engine::DocId(doc)).is_none());
         assert!(a.session().get(pdfcraft_engine::DocId(other)).is_some());
         assert_eq!(std::fs::read(dir.0.join("a.pdf")).unwrap(), source);
+    }
+}
+
+mod combine_argument_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Own only a newly created directory; the bounded runner provides project-local TMPDIR.
+    struct CombineDir(PathBuf);
+
+    impl CombineDir {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let parent = std::env::temp_dir();
+            for _ in 0..128 {
+                let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+                let path = parent.join(format!("pdfcraft-combine-{}-{serial}", std::process::id()));
+                match std::fs::create_dir(&path) {
+                    Ok(()) => {
+                        let dir = Self(path);
+                        std::fs::write(dir.0.join("a.pdf"), fixture(3)).unwrap();
+                        std::fs::write(dir.0.join("b.pdf"), fixture(2)).unwrap();
+                        return dir;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("creating combine test directory: {error}"),
+                }
+            }
+            panic!("no unused combine test directory after 128 attempts");
+        }
+    }
+
+    impl Drop for CombineDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn invalid_combine_selectors_preserve_outputs_inputs_and_open_documents() {
+        let dir = CombineDir::new();
+        let first = std::fs::read(dir.0.join("a.pdf")).unwrap();
+        let second = std::fs::read(dir.0.join("b.pdf")).unwrap();
+        let sentinel = b"existing destination";
+        std::fs::write(dir.0.join("combined.pdf"), sentinel).unwrap();
+        let mut a = auto(&dir.0);
+        let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+        ok(&mut a, "doc_set_info", json!({ "doc": doc, "key": "Title", "value": "Unsaved title" }));
+        ok(&mut a, "doc_open", json!({ "path": "b.pdf" }));
+        let list = ok(&mut a, "doc_list", json!({}));
+        let info = ok(&mut a, "doc_info", json!({ "doc": doc }));
+        let text = page_text(&mut a, doc);
+        let bytes = a.session().get(pdfcraft_engine::DocId(doc)).unwrap().bytes.clone();
+        for invalid in [json!(1), json!(true), json!({ "page": 1 }), json!(["1"])] {
+            for (index, pages) in [json!([invalid, null]), json!([null, invalid])].into_iter().enumerate() {
+                for out in ["combined.pdf", "not-created.pdf"] {
+                    let error = a.call("doc_combine", &json!({ "paths": ["a.pdf", "b.pdf"], "pages": pages, "out": out, "open": true })).unwrap_err();
+                    assert!(
+                        matches!(error, ToolError::InvalidArgs(ref message) if message == &format!("pages[{index}] must be a range string or null"))
+                    );
+                    assert_eq!(std::fs::read(dir.0.join("combined.pdf")).unwrap(), sentinel);
+                    assert!(!dir.0.join("not-created.pdf").exists());
+                    assert_eq!(ok(&mut a, "doc_list", json!({})), list);
+                    assert_eq!(ok(&mut a, "doc_info", json!({ "doc": doc })), info);
+                    assert_eq!(page_text(&mut a, doc), text);
+                    assert_eq!(a.session().get(pdfcraft_engine::DocId(doc)).unwrap().bytes, bytes);
+                    assert_eq!(std::fs::read(dir.0.join("a.pdf")).unwrap(), first);
+                    assert_eq!(std::fs::read(dir.0.join("b.pdf")).unwrap(), second);
+                }
+            }
+        }
+        let error = a
+            .call("doc_combine", &json!({ "paths": ["missing-a.pdf", "missing-b.pdf"], "pages": [null, false], "out": "not-created.pdf" }))
+            .unwrap_err();
+        assert!(matches!(error, ToolError::InvalidArgs(ref message) if message == "pages[1] must be a range string or null"));
+        assert_eq!(ok(&mut a, "doc_list", json!({})), list);
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 3, "no output or staging files are created");
+    }
+
+    #[test]
+    fn valid_combine_selectors_keep_all_pages_and_selected_order_after_reopen() {
+        let dir = CombineDir::new();
+        let first = std::fs::read(dir.0.join("a.pdf")).unwrap();
+        let second = std::fs::read(dir.0.join("b.pdf")).unwrap();
+        let mut a = auto(&dir.0);
+        let all = vec!["Page 1", "Page 2", "Page 3", "Page 1", "Page 2"];
+        for (pages, expected) in [
+            (None, all.clone()),
+            (Some(Value::Null), all.clone()),
+            (Some(json!([null, null])), all.clone()),
+            (Some(json!(["", null])), all),
+            (Some(json!(["3, 1", null])), vec!["Page 3", "Page 1", "Page 1", "Page 2"]),
+            (Some(json!([null, "2"])), vec!["Page 1", "Page 2", "Page 3", "Page 2"]),
+        ] {
+            let mut args = json!({ "paths": ["a.pdf", "b.pdf"], "out": "combined.pdf", "open": false });
+            if let Some(pages) = pages {
+                args["pages"] = pages;
+            }
+            let result = ok(&mut a, "doc_combine", args);
+            assert!(result["bytes"].as_u64().unwrap() > 0);
+            assert!(result.get("document").is_none());
+            assert!(a.session().docs().is_empty());
+            let mut fresh = auto(&dir.0);
+            let opened = ok(&mut fresh, "doc_open", json!({ "path": "combined.pdf" }));
+            assert_eq!(opened["pages"].as_u64().unwrap(), expected.len() as u64);
+            assert_eq!(page_text(&mut fresh, opened["doc"].as_u64().unwrap()), expected);
+            assert_eq!(std::fs::read(dir.0.join("a.pdf")).unwrap(), first);
+            assert_eq!(std::fs::read(dir.0.join("b.pdf")).unwrap(), second);
+        }
     }
 }

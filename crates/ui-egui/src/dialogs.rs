@@ -814,14 +814,17 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 return;
             }
             Dialog::Signature => {
-                let (apply, cancel) = crate::fill_sign::signature_pad(ui, &t, &mut app.signature_draft, &mut app.signature_preview);
+                let (apply, cancel, browse) = crate::fill_sign::signature_pad(ui, &t, &mut app.signature_draft, &mut app.signature_preview);
+                if browse {
+                    app.pick_signature_image();
+                }
                 if apply {
                     let d = std::mem::take(&mut app.signature_draft);
                     let tool = if d.initials {
-                        app.initials = Some(d.saved());
+                        app.initials = d.saved();
                         crate::fill_sign::FillTool::Initials
                     } else {
-                        app.signature = Some(d.saved());
+                        app.signature = d.saved();
                         crate::fill_sign::FillTool::Signature
                     };
                     app.quick_tool = crate::QuickTool::Fill(tool);
@@ -1190,10 +1193,8 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 }
             }
         }
-        Some(Dialog::Sanitize) => {
-            if app.apply_edit(Edit::Sanitize) {
-                app.notify_tr("Document sanitized. Save to finish: saving rewrites the whole file.");
-            }
+        Some(Dialog::Sanitize) if app.apply_edit(Edit::Sanitize) => {
+            app.notify_tr("Document sanitized. Save to finish: saving rewrites the whole file.");
         }
         Some(Dialog::RedactApply) => {
             let marks = app.active_ids().and_then(|(_, id)| app.session.get(id)).map_or(0, |d| d.redaction_marks());
@@ -1423,8 +1424,18 @@ fn link_prompt(app: &mut PdfCraftApp, ctx: &egui::Context) {
         };
         ui.label(crate::i18n::fmt(template, &[("who", tl!(pending.origin.noun()))]));
         ui.add_space(6.0);
-        if let Some(host) = pdfcraft_engine::links::host(&pending.url) {
-            ui.label(egui::RichText::new(host).font(theme::semibold(14.0)));
+        // The host as the browser will connect to it, in punycode when it is international, so a
+        // lookalike such as `pаypal.com` (Cyrillic `а`) reads as `xn--pypal-4ve.com`. Its Unicode
+        // form isn't repeated here: a whole-script lookalike would read as the real site.
+        if let Some(host) = pdfcraft_engine::links::display_host(&pending.url) {
+            ui.label(egui::RichText::new(&host.ascii).font(theme::semibold(14.0)));
+            if host.mixed_scripts {
+                let warning = tl!("This web address mixes letters from different alphabets, a common way to imitate another site's name.");
+                ui.add(egui::Label::new(egui::RichText::new(warning).color(egui::Color32::from_rgb(0xD1, 0x3B, 0x3B))).wrap());
+            } else if host.international {
+                let note = tl!("This web address uses letters from another alphabet, which can look like familiar ones.");
+                ui.add(egui::Label::new(egui::RichText::new(note).color(t.text)).wrap());
+            }
         }
         egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
             ui.add(egui::Label::new(egui::RichText::new(&pending.url).monospace().small()).wrap().selectable(true));
