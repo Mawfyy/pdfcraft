@@ -1290,7 +1290,7 @@ fn save_prompt(app: &mut PdfCraftApp, ctx: &egui::Context) {
         ui.set_width(420.0);
         ui.horizontal(|ui| {
             ui.add(crate::icons::image("save", 22.0, t.accent));
-            ui.label(egui::RichText::new(format!("Save changes to “{name}” before closing?")).font(theme::semibold(16.0)));
+            ui.add(egui::Label::new(egui::RichText::new(format!("Save changes to “{name}” before closing?")).font(theme::semibold(16.0))).wrap());
         });
         ui.add_space(6.0);
         ui.label(egui::RichText::new("Your changes will be lost if you don't save them.").color(t.text_muted));
@@ -1384,7 +1384,7 @@ fn password(app: &mut PdfCraftApp, ctx: &egui::Context) {
             ui.label(egui::RichText::new("Password required").font(theme::semibold(17.0)));
         });
         ui.add_space(6.0);
-        ui.label(format!("“{}” is protected. Enter a password to open it.", prompt.name));
+        ui.add(egui::Label::new(format!("“{}” is protected. Enter a password to open it.", prompt.name)).wrap());
         ui.add_space(8.0);
         let r = ui.add(egui::TextEdit::singleline(&mut prompt.input).password(true).hint_text("Password").desired_width(f32::INFINITY));
         // Enter submits. The field keeps focus (we request it every frame), so check the key
