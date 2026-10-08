@@ -17,6 +17,10 @@ impl PdfCraftApp {
     /// Whether a registered command can run now. The engine judges the document (security,
     /// contents, undo history); view state it can't see is checked here.
     pub(crate) fn command_enabled(&self, spec: &CommandSpec) -> bool {
+        // Undo and Redo act on the Combine files list while its tab shows.
+        if self.combine_showing() && matches!(spec.needs, commands::Needs::Undo | commands::Needs::Redo) {
+            return self.combine_can_undo(spec.needs == commands::Needs::Undo);
+        }
         commands::is_enabled(spec, &self.session, self.active_ids().map(|(_, id)| id))
             && (spec.needs != commands::Needs::TwoPageView || self.active.and_then(|i| self.views.get(i)).is_some_and(crate::DocView::cover_applies))
     }
@@ -81,7 +85,7 @@ impl PdfCraftApp {
                 Some(p) => self.open_recent(&p),
                 None => self.notify_tr("No recent files"),
             },
-            "page.combine" => self.combine_dialog(),
+            "page.combine" => self.open_combine_tab(),
             "file.save" => {
                 self.save_active(SaveTarget::InPlace);
             }
