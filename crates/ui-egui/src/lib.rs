@@ -102,25 +102,6 @@ pub(crate) fn date_text_for_pdf(session: &Session) -> Result<String, String> {
 /// The longest author name kept (Preferences ▸ Identity, restored settings).
 pub(crate) const MAX_AUTHOR_CHARS: usize = 200;
 
-/// A colour entry is an `[r, g, b]` array of finite numbers; anything else (a string, a wrong
-/// length, a null, or a non-finite number) is refused whole, so the tool keeps its default
-/// colour. Finite out-of-range numbers are clamped to 0–1 (the trusted boundary for restored
-/// settings); a string, a wrong length, a null or a non-finite value is refused whole.
-fn rgb_triple(v: &serde_json::Value) -> Option<[f64; 3]> {
-    let a = v.as_array()?;
-    if a.len() != 3 {
-        return None;
-    }
-    let mut out = [0.0f64; 3];
-    for (slot, x) in out.iter_mut().zip(a.iter()) {
-        let n = x.as_f64()?;
-        if !n.is_finite() {
-            return None;
-        }
-        *slot = n.clamp(0.0, 1.0);
-    }
-    Some(out)
-}
 pub mod portable;
 mod protect;
 mod recovery;
@@ -642,6 +623,25 @@ impl Default for PdfCraftApp {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// A restored colour: an `[r, g, b]` array of finite numbers, each clamped to 0–1 (restored
+/// settings are untrusted). Anything else (a string, a wrong length, a null or a non-finite
+/// number) is refused whole, so the caller keeps its default.
+fn rgb_triple(v: &serde_json::Value) -> Option<[f64; 3]> {
+    let a = v.as_array()?;
+    if a.len() != 3 {
+        return None;
+    }
+    let mut out = [0.0f64; 3];
+    for (slot, x) in out.iter_mut().zip(a.iter()) {
+        let n = x.as_f64()?;
+        if !n.is_finite() {
+            return None;
+        }
+        *slot = n.clamp(0.0, 1.0);
+    }
+    Some(out)
 }
 
 impl PdfCraftApp {
@@ -1388,9 +1388,16 @@ impl PdfCraftApp {
                 if let Some(w) = e["width"].as_f64() {
                     self.comment_prefs.set_width(tool, w);
                 }
-                if let Some(fill) = rgb_triple(&e["fill"]) {
+                // `"fill": null` is a saved "no fill", which clears a tool's default fill; a
+                // missing or malformed fill keeps it.
+                let fill = match e.get("fill") {
+                    Some(serde_json::Value::Null) => Some(None),
+                    Some(v) => rgb_triple(v).map(Some),
+                    None => None,
+                };
+                if let Some(fill) = fill {
                     let mut s = self.comment_prefs.style(tool);
-                    s.fill = Some(fill);
+                    s.fill = fill;
                     self.comment_prefs.set_style(tool, s);
                 }
             }

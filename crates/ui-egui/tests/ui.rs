@@ -380,6 +380,30 @@ fn persistence_round_trips_and_tolerates_garbage() {
     assert_eq!(b.theme, pdfcraft_ui_egui::theme::ThemeKind::Dark);
 }
 
+/// A tool's saved "no fill" (`"fill": null`) clears a fill it had as its default; a missing or
+/// malformed fill keeps it (#340).
+#[test]
+fn a_saved_no_fill_clears_a_comment_tool_default_fill() {
+    use pdfcraft_ui_egui::comments::CommentTool;
+    let filled = |a: &mut PdfCraftApp| {
+        let mut s = a.comment_prefs.style(CommentTool::Rectangle);
+        s.fill = Some([0.2, 0.4, 0.6]);
+        a.comment_prefs.set_style(CommentTool::Rectangle, s);
+    };
+    let mut a = PdfCraftApp::new();
+    filled(&mut a);
+    a.restore(r#"{"comment_styles":[{"tool":"comment.square","fill":null}]}"#);
+    assert_eq!(a.comment_prefs.style(CommentTool::Rectangle).fill, None, "null clears the fill");
+    let mut b = PdfCraftApp::new();
+    filled(&mut b);
+    b.restore(r#"{"comment_styles":[{"tool":"comment.square","color":[0,0,1]},{"tool":"comment.square","fill":"red"}]}"#);
+    assert_eq!(b.comment_prefs.style(CommentTool::Rectangle).fill, Some([0.2, 0.4, 0.6]), "missing or malformed keeps it");
+    // A round trip keeps a cleared fill cleared.
+    let mut c = PdfCraftApp::new();
+    c.restore(&a.persist());
+    assert_eq!(c.comment_prefs.style(CommentTool::Rectangle).fill, None);
+}
+
 /// Persisted per-tool comment styles go through their clamping setters: hostile or malformed
 /// values are clamped or ignored, never trusted (#340).
 #[test]
