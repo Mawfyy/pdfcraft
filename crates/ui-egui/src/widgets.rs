@@ -63,9 +63,22 @@ pub fn search_box(ui: &mut egui::Ui, placeholder: &str, width: f32) -> Response 
     let fill = if resp.hovered() { t.hover } else { t.field };
     ui.painter().rect(rect, CornerRadius::same(16), fill, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
     icons::paint(ui, Rect::from_min_size(rect.min + vec2(10.0, 8.0), vec2(16.0, 16.0)), "search", 15.0, t.text_muted);
-    ui.painter().text(rect.left_center() + vec2(34.0, 0.0), Align2::LEFT_CENTER, placeholder, theme::regular(13.0), t.text_faint);
-    ui.painter().text(rect.right_center() - vec2(12.0, 0.0), Align2::RIGHT_CENTER, "⌘K", theme::regular(11.5), t.text_faint);
-    resp.on_hover_cursor(egui::CursorIcon::Text)
+    let shortcut = ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K));
+    let shortcut = ui.painter().layout_no_wrap(shortcut, theme::regular(11.5), t.text_faint);
+    let shortcut_pos = rect.right_center() - vec2(12.0 + shortcut.size().x, shortcut.size().y * 0.5);
+    // Reserve the measured shortcut width in every language; long translations are elided
+    // within the remaining space rather than painted underneath the shortcut.
+    let text_right = (shortcut_pos.x - 10.0).max(rect.left());
+    let text_left = (rect.left() + 34.0).min(text_right);
+    let text_rect = Rect::from_min_max(egui::pos2(text_left, rect.top()), egui::pos2(text_right, rect.bottom()));
+    let mut job = egui::text::LayoutJob::simple_singleline(placeholder.to_owned(), theme::regular(13.0), t.text_faint);
+    job.wrap = egui::text::TextWrapping { max_width: text_rect.width(), max_rows: 1, break_anywhere: true, ..Default::default() };
+    let text = ui.fonts_mut(|f| f.layout_job(job));
+    let elided = text.elided;
+    ui.painter().with_clip_rect(text_rect).galley(egui::pos2(text_left, rect.center().y - text.size().y * 0.5), text, t.text_faint);
+    ui.painter().with_clip_rect(rect).galley(shortcut_pos, shortcut, t.text_faint);
+    let resp = resp.on_hover_cursor(egui::CursorIcon::Text);
+    if elided { resp.on_hover_text(placeholder) } else { resp }
 }
 
 pub fn menu_item(ui: &mut egui::Ui, label: &str, shortcut: &str) -> Response {
@@ -78,6 +91,16 @@ pub fn section_title(ui: &mut egui::Ui, text: &str) {
     // Section titles across every panel go through here, so one translation point covers them.
     ui.label(egui::RichText::new(tl!(text).to_uppercase()).font(theme::semibold(10.5)).color(t.text_faint).extra_letter_spacing(0.6));
     ui.add_space(2.0);
+}
+
+/// Paint one line of `text` left-aligned and vertically centred on `pos`, cut with "…" so it is
+/// at most `max_width` wide: a long file name or path stays inside its row (#425).
+pub fn row_text(ui: &egui::Ui, pos: egui::Pos2, text: impl Into<String>, font: egui::FontId, color: Color32, max_width: f32) {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.into(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_width.max(0.0));
+    let galley = ui.painter().layout_job(job);
+    let rect = Align2::LEFT_CENTER.anchor_size(pos, galley.size());
+    ui.painter().galley(rect.min, galley, color);
 }
 
 /// Transient message at the bottom centre.
@@ -105,7 +128,15 @@ pub fn toast(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 .corner_radius(CornerRadius::same(8))
                 .inner_margin(egui::Margin::symmetric(16, 10))
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new(msg).color(if t.dark() { Color32::from_rgb(0x22, 0x22, 0x26) } else { Color32::WHITE }));
+                    // An Area remembers its previous content width. A short notice
+                    // must not force the next validation message into a narrow column.
+                    // Allow natural short labels; wrap longer ones within the viewport,
+                    // including the frame's 32 points and 16-point outside margins.
+                    ui.set_max_width((screen.width() - 64.0).clamp(1.0, 560.0));
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(msg).color(if t.dark() { Color32::from_rgb(0x22, 0x22, 0x26) } else { Color32::WHITE }))
+                            .wrap(),
+                    );
                 });
         });
     ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -272,4 +303,69 @@ pub fn icon_pill(ui: &mut egui::Ui, icon: &str, label: &str, primary: bool) -> R
     crate::icons::paint(ui, Rect::from_min_size(rect.min + vec2(12.0, 7.0), vec2(16.0, 16.0)), icon, 15.0, text);
     ui.painter().text(rect.left_center() + vec2(34.0, 0.0), Align2::LEFT_CENTER, label, font, text);
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::Pos2;
+
+    #[test]
+    fn search_placeholder_never_overlaps_the_shortcut() {
+        for width in [260.0, 160.0, 90.0] {
+            let ctx = egui::Context::default();
+            ctx.set_fonts(theme::font_definitions());
+            let placeholder = "Werkzeuge und Befehle suchen";
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                search_box(ui, placeholder, width);
+            });
+            let text_shapes: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| if let egui::Shape::Text(text) = &shape.shape { Some((shape.clip_rect, text)) } else { None })
+                .collect();
+            let (clip, hint) = text_shapes.iter().find(|(_, text)| text.galley.job.text == placeholder).unwrap();
+            let (_, shortcut) = text_shapes.iter().find(|(_, text)| text.galley.job.text.contains('K')).unwrap();
+            assert!(clip.right() <= shortcut.pos.x - 9.0, "hint must leave a gap before the shortcut at width {width}");
+            assert!(hint.galley.elided, "the long original German hint must be elided at width {width}");
+            assert_eq!(hint.galley.rows.len(), 1);
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    fn toast_rect(app: &mut PdfCraftApp, ctx: &egui::Context, width: f32, now: &mut f64) -> Rect {
+        // Let the Area settle after a notice/viewport change, without advancing to
+        // expiry. No native rendering or renderer worker is needed for this layout.
+        for _ in 0..3 {
+            *now += 0.016;
+            let output = ctx.run_ui(
+                egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(width, 900.0))), time: Some(*now), ..Default::default() },
+                |ui| toast(app, ui.ctx()),
+            );
+            output.drop_without_applying_deltas();
+        }
+        ctx.memory(|memory| memory.area_rect(egui::Id::new("toast")).unwrap())
+    }
+
+    #[test]
+    fn toast_width_adapts_to_long_notices_and_narrow_viewports() {
+        let ctx = egui::Context::default();
+        let mut app = PdfCraftApp::new();
+        let mut now = 1.0;
+        app.notify("Saved");
+        let short = toast_rect(&mut app, &ctx, 1280.0, &mut now);
+        assert!(short.width() < 160.0, "short notices retain their natural width: {short:?}");
+        app.notify("Fill in name failed: The value entered is not valid for the field [ name ]");
+        let long = toast_rect(&mut app, &ctx, 1280.0, &mut now);
+        assert!(long.width() > 300.0, "a previous short Area must not squeeze validation feedback: {long:?}");
+        assert!(long.height() < 85.0, "ordinary feedback must not become a seven-line column: {long:?}");
+        for width in [320.0, 180.0] {
+            let rect = toast_rect(&mut app, &ctx, width, &mut now);
+            assert!(rect.width() <= width - 32.0 + 1.0, "frame and viewport margins must fit: {rect:?}");
+            assert!(rect.left() >= 15.0 && rect.right() <= width - 15.0, "notice remains horizontally on screen: {rect:?}");
+        }
+        app.notify("Saved");
+        let again = toast_rect(&mut app, &ctx, 1280.0, &mut now);
+        assert!((again.width() - short.width()).abs() < 1.0, "long notices must not impose a permanent minimum width");
+    }
 }
