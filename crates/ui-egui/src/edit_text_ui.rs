@@ -410,6 +410,8 @@ fn user_box(xf: &PageXform, info: &DocInfo, page: usize, r: Rect) -> [f64; 4] {
 }
 
 /// Images on a page: select, move, resize, right-click. Returns `true` when the pointer was used.
+/// `drop_target` is the page under the pointer this frame, if any: a drag released there moves
+/// the image onto it (#787).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn image_input(
     ui: &egui::Ui,
@@ -421,6 +423,7 @@ pub(crate) fn image_input(
     view: &mut DocView,
     action: &mut Option<ImageAction>,
     allow_interaction: bool,
+    drop_target: Option<(usize, PageXform)>,
 ) -> bool {
     let boxes: Vec<Rect> = images.iter().map(|im| im.visible_rect.map_or(Rect::NOTHING, |r| xf.user_rect(info, page, r.map(|v| v as f32)))).collect();
     let painter = ui.painter();
@@ -531,13 +534,20 @@ pub(crate) fn image_input(
                 painter.rect_stroke(visible, CornerRadius::ZERO, Stroke::new(1.5, ACCENT), egui::StrokeKind::Outside);
                 handles(preview);
             }
+            // Releasing over another page takes the image there (#787); a resize stays put.
+            let land = drop_target.filter(|_| opposite.is_none()).filter(|(t, _)| *t != page);
+            if let Some((_, txf)) = land {
+                painter.rect_stroke(txf.rect, CornerRadius::ZERO, Stroke::new(1.5, ACCENT), egui::StrokeKind::Outside);
+            }
             if resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
                 if let Some(s) = view.image_selection.as_mut() {
                     s.drag = None;
                 }
                 if preview != b {
-                    view.pending_edit =
-                        Some(Edit::EditPageImage { page, index: i, change: pdfcraft_engine::ImageEdit::Move(user_box(xf, info, page, target)) });
+                    view.pending_edit = match land {
+                        Some((t, txf)) => Some(Edit::MoveImageToPage { from: page, index: i, to: t, rect: user_box(&txf, info, t, target) }),
+                        None => Some(Edit::EditPageImage { page, index: i, change: pdfcraft_engine::ImageEdit::Move(user_box(xf, info, page, target)) }),
+                    };
                 }
             }
             ui.ctx().set_cursor_icon(match opposite {

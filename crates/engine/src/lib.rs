@@ -1402,6 +1402,14 @@ pub enum Edit {
         index: usize,
         change: ImageEdit,
     },
+    /// Edit a PDF ▸ an existing image moved to another page: `index` from
+    /// `Document::page_images` on `from`, drawn in the user-space box `rect` on `to`.
+    MoveImageToPage {
+        from: usize,
+        index: usize,
+        to: usize,
+        rect: [f64; 4],
+    },
     /// Move mixed existing and added objects together. References resolve before any change;
     /// offset is a user-space vector. No retyping, reflow or font substitution is involved.
     MoveObjects {
@@ -1829,6 +1837,7 @@ impl Edit {
             Edit::EditTextLine { .. } | Edit::EditTextBlock { .. } => Label::of("Edit text"),
             Edit::RegisterTextFont { .. } => Label::of("Load document font"),
             Edit::MoveObjects { objects, .. } => plural("Move object", "Move objects", objects.len()),
+            Edit::MoveImageToPage { .. } => Label::of("Move image"),
             Edit::EditPageImage { change, .. } => Label::of(match change {
                 ImageEdit::Move(_) => "Move image",
                 ImageEdit::Rotate(_) => "Rotate image",
@@ -2015,6 +2024,7 @@ fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), Ed
         | Edit::EditTextBlock { .. }
         | Edit::RegisterTextFont { .. }
         | Edit::EditPageImage { .. }
+        | Edit::MoveImageToPage { .. }
         | Edit::Flatten { .. }
         | Edit::FlattenFillSign => {
             if p.modify() {
@@ -2335,6 +2345,7 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
             };
             pdfcraft_edit::change_image(doc, *page, *index, &c)?;
         }
+        Edit::MoveImageToPage { from, index, to, rect } => pdfcraft_edit::move_image(doc, *from, *index, *to, *rect)?,
         Edit::MoveObjects { page, objects, offset } => pdfcraft_edit::move_objects(doc, *page, objects, *offset)?,
         Edit::EditTextBlock { page, block, text, style } => {
             pdfcraft_edit::rewrite_block(doc, *page, *block, Some(text), style)?;

@@ -2430,6 +2430,15 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             // Set again below when the right-click lands on a link.
             view.links.context = None;
         }
+        // Where a drag would drop (#787): the page under the pointer, with its mapping. Found
+        // here, before the loop, so it covers pages the loop has not reached this frame.
+        let drop_target = pointer.and_then(|p| {
+            visible_pages.iter().copied().find_map(|i| {
+                let r = snap_to_pixels(rects[i].translate(origin.to_vec2()), ppp);
+                r.contains(p)
+                    .then(|| (i, PageXform { rect: r, rot: view.rotation, pw: info.pages[i].width.max(1.0), ph: info.pages[i].height.max(1.0) }))
+            })
+        });
         for &i in &visible_pages {
             let r = snap_to_pixels(rects[i].translate(origin.to_vec2()), ppp);
             if !r.intersects(visible.expand(400.0)) {
@@ -2726,8 +2735,18 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 // Editable text takes precedence over background/overlapping artwork. Both
                 // inventories are painted every frame, even when text owns the pointer.
                 let text_used = crate::edit_text_ui::page_input(ui, &resp, &xf, i, doc, &lines, view, !image_owns_pointer);
-                let image_used =
-                    crate::edit_text_ui::image_input(ui, &resp, &xf, i, info, &images, view, &mut image_action, image_owns_pointer || !text_used);
+                let image_used = crate::edit_text_ui::image_input(
+                    ui,
+                    &resp,
+                    &xf,
+                    i,
+                    info,
+                    &images,
+                    view,
+                    &mut image_action,
+                    image_owns_pointer || !text_used,
+                    drop_target,
+                );
                 text_used || image_used
             };
             let on_link = tool == QuickTool::Link && can_modify && crate::link_ui::page_input(ui, &resp, &xf, i, info, &doc_links, view);
