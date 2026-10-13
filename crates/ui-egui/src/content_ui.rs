@@ -257,6 +257,14 @@ fn to_display(xf: &PageXform, info: &DocInfo, page: usize, p: Pos2) -> [f64; 2] 
     [vx as f64, info.pages[page].height as f64 - vy as f64]
 }
 
+/// Whether the press lands on one of the page's added items. They sit above the page's own
+/// artwork, so that press belongs to the added-content handler whatever the tool: the object
+/// and paragraph handlers must not claim it first (#787).
+pub(crate) fn press_on_item(ui: &egui::Ui, xf: &PageXform, page: usize, info: &DocInfo, added: &[Added]) -> bool {
+    let Some(p) = ui.input(|i| i.pointer.press_origin().or(i.pointer.hover_pos())) else { return false };
+    on_page(added, page).iter().any(|(_, a)| screen_rect(xf, info, page, a.content.rect()).expand(2.0).contains(p))
+}
+
 fn on_page(added: &[Added], page: usize) -> Vec<(usize, &Added)> {
     added.iter().filter(|a| a.page == page).enumerate().collect()
 }

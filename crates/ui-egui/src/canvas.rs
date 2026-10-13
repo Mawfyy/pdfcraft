@@ -2707,14 +2707,21 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 crate::redact_ui::page_input(ui, &resp, &xf, i, info, over_text, view)
             };
             let image_owns_pointer = tool == QuickTool::EditText && crate::edit_text_ui::image_owns_pointer(ui, &xf, i, info, view);
-            let on_objects =
-                !image_owns_pointer && tool == QuickTool::EditText && can_modify && crate::object_ui::page_input(ui, &resp, &xf, i, doc, view);
+            // A press on an added item goes to the added-content handler whatever the tool:
+            // it sits above the page's own artwork, so the object and paragraph handlers must
+            // not claim a gesture over the picture (#787).
+            let content_press = editing_content && can_modify && crate::content_ui::press_on_item(ui, &xf, i, info, &added);
+            let on_objects = !content_press
+                && !image_owns_pointer
+                && tool == QuickTool::EditText
+                && can_modify
+                && crate::object_ui::page_input(ui, &resp, &xf, i, doc, view);
             let on_content = !on_objects && editing_content && can_modify && {
                 crate::content_ui::page_input(ui, &resp, &xf, i, info, &added, tool == QuickTool::AddText, &text_style, view, drop_target)
                     || tool == QuickTool::AddText
             };
             // Added content owns its gesture; its source text must not queue a second edit.
-            let on_edit_text = !on_objects && !on_content && tool == QuickTool::EditText && can_modify && {
+            let on_edit_text = !on_objects && !on_content && !content_press && tool == QuickTool::EditText && can_modify && {
                 let generation = doc.edit_generation();
                 let lines = match view.edit_lines.get(&i) {
                     Some((g, l)) if *g == generation => l.clone(),
