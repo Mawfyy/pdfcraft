@@ -12,6 +12,8 @@ which packages text, vector paths, and nested images into one object. PdfCraft s
 this object using its `BBox` and optional `Matrix` and edits it as a whole. Its original
 content, resources, clipping box, and transparency settings remain intact. Moving or
 deleting one use of a shared figure does not alter its other placements or pages.
+Pictures you add yourself from the Edit a PDF panel — and added text — drag from one page
+onto another the same way; a resize with a corner handle stays on its own page.
 
 **Replace Image** and **Save Image As** apply only to raster Image XObjects; these menu
 items are disabled for grouped Form artwork. The tool does not ungroup Forms, edit their

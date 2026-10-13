@@ -1479,6 +1479,14 @@ pub enum Edit {
         index: usize,
         content: AddedContent,
     },
+    /// Move an added item to another page (#787): `index` among `from`'s added items, drawn as
+    /// `content` on `to` (its box in that page's display space). One undo step.
+    MoveContentToPage {
+        from: usize,
+        index: usize,
+        to: usize,
+        content: AddedContent,
+    },
     DeleteContent {
         page: usize,
         index: usize,
@@ -1857,6 +1865,7 @@ impl Edit {
             Edit::AddText { .. } => Label::of("Add text"),
             Edit::AddImage { .. } => Label::of("Add image"),
             Edit::UpdateContent { .. } => Label::of("Edit content"),
+            Edit::MoveContentToPage { .. } => Label::of("Move content"),
             Edit::DeleteContent { .. } => Label::of("Delete content"),
             Edit::ReplaceImage { .. } => Label::of("Replace image"),
             Edit::ApplyRedactions { .. } => Label::of("Apply redactions"),
@@ -1993,6 +2002,7 @@ fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), Ed
         | Edit::AddText { .. }
         | Edit::AddImage { .. }
         | Edit::UpdateContent { .. }
+        | Edit::MoveContentToPage { .. }
         | Edit::MoveObjects { .. }
         | Edit::DeleteContent { .. }
         | Edit::ReplaceImage { .. }
@@ -2399,6 +2409,7 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
             pdfcraft_edit::add_content(doc, *page, &AddedContent::Image(pdfcraft_edit::AddedImage::new(rect, image)))?;
         }
         Edit::UpdateContent { page, index, content } => pdfcraft_edit::update_content(doc, *page, *index, content)?,
+        Edit::MoveContentToPage { from, index, to, content } => pdfcraft_edit::move_content(doc, *from, *index, *to, content)?,
         Edit::DeleteContent { page, index } => pdfcraft_edit::delete_content(doc, *page, *index)?,
         Edit::ReplaceImage { page, index, name, bytes } => {
             let item = pdfcraft_edit::list_added(doc).into_iter().filter(|a| a.page == *page).nth(*index);

@@ -109,6 +109,39 @@ fn prepared_open_does_not_mutate_the_session_until_commit() {
 }
 
 #[test]
+fn an_added_image_moves_to_another_page_in_one_undo_step() {
+    let mut png = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut png, 20, 10);
+        enc.set_color(png::ColorType::Rgb);
+        let mut w = enc.write_header().unwrap();
+        w.write_image_data(&[200u8, 40, 40].repeat(200)).unwrap();
+    }
+    let (mut s, id) = session_with(2);
+    // A red 100 × 50 box at 40,40 on page 1 (display space).
+    s.apply(id, Edit::AddImage { page: 0, rect: Some([40.0, 40.0, 140.0, 90.0]), name: "red.png".into(), bytes: Arc::new(png) }).unwrap();
+    let content = s.get(id).unwrap().added[0].content.clone();
+    s.apply(id, Edit::MoveContentToPage { from: 0, index: 0, to: 1, content: content.with_rect([60.0, 150.0, 160.0, 200.0]) }).unwrap();
+    {
+        let d = s.get(id).unwrap();
+        assert_eq!(d.added.len(), 1, "one item, moved not copied");
+        assert_eq!(d.added[0].page, 1, "on page 2 now");
+        assert_eq!(d.added[0].content.rect(), [60.0, 150.0, 160.0, 200.0]);
+        assert_eq!(d.can_undo(), Some("Move content"));
+    }
+    let (there, gone) = (pixel(&s, id, 1, 100, 175), pixel(&s, id, 0, 80, 60));
+    assert!(there[0] > 150 && there[1] < 90, "red where it landed: {there:?}");
+    assert!(gone[0] > 200 && gone[1] > 200 && gone[2] > 200, "white where it was: {gone:?}");
+    // One undo step puts it back.
+    s.undo(id).unwrap();
+    let d = s.get(id).unwrap();
+    assert_eq!(d.added[0].page, 0);
+    assert_eq!(d.added[0].content.rect(), [40.0, 40.0, 140.0, 90.0]);
+    let back = pixel(&s, id, 0, 80, 60);
+    assert!(back[0] > 150 && back[1] < 90, "red back on page 1: {back:?}");
+}
+
+#[test]
 fn custom_image_stamp_keeps_displayed_orientation_on_rotated_pages() {
     let colours = [[240, 20, 20, 255], [20, 180, 20, 255], [20, 20, 240, 255], [230, 180, 20, 255]];
     let image = image::RgbaImage::from_fn(80, 40, |x, y| image::Rgba(colours[usize::from(y >= 20) * 2 + usize::from(x >= 40)]));

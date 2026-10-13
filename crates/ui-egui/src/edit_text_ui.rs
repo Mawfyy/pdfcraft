@@ -402,6 +402,20 @@ pub(crate) enum ImageAction {
     CopyFile(usize, usize),
 }
 
+/// The selected image mid-move: (source page, its box at the pointer), for the overlay the
+/// canvas draws above every page (#787). A corner resize stays on its own page.
+pub(crate) fn move_preview(view: &DocView, info: &DocInfo, pointer: Pos2) -> Option<(usize, Rect)> {
+    let s = view.image_selection.as_ref()?;
+    let (start, opposite) = s.drag?;
+    if opposite.is_some() {
+        return None;
+    }
+    let xf = view.page_xform(s.page)?;
+    let (_, images) = view.edit_images.get(&s.page)?;
+    let image = images.get(s.index)?;
+    Some((s.page, xf.user_rect(info, s.page, image.rect.map(|v| v as f32)).translate(pointer - start)))
+}
+
 fn user_box(xf: &PageXform, info: &DocInfo, page: usize, r: Rect) -> [f64; 4] {
     let p = &info.pages[page];
     let (a, b) = (xf.screen_to_view(r.min), xf.screen_to_view(r.max));
@@ -535,10 +549,8 @@ pub(crate) fn image_input(
                 handles(preview);
             }
             // Releasing over another page takes the image there (#787); a resize stays put.
+            // The target's outline is drawn by the canvas overlay, above every page.
             let land = drop_target.filter(|_| opposite.is_none()).filter(|(t, _)| *t != page);
-            if let Some((_, txf)) = land {
-                painter.rect_stroke(txf.rect, CornerRadius::ZERO, Stroke::new(1.5, ACCENT), egui::StrokeKind::Outside);
-            }
             if resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
                 if let Some(s) = view.image_selection.as_mut() {
                     s.drag = None;
@@ -546,7 +558,9 @@ pub(crate) fn image_input(
                 if preview != b {
                     view.pending_edit = match land {
                         Some((t, txf)) => Some(Edit::MoveImageToPage { from: page, index: i, to: t, rect: user_box(&txf, info, t, target) }),
-                        None => Some(Edit::EditPageImage { page, index: i, change: pdfcraft_engine::ImageEdit::Move(user_box(xf, info, page, target)) }),
+                        None => {
+                            Some(Edit::EditPageImage { page, index: i, change: pdfcraft_engine::ImageEdit::Move(user_box(xf, info, page, target)) })
+                        }
                     };
                 }
             }

@@ -2710,7 +2710,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             let on_objects =
                 !image_owns_pointer && tool == QuickTool::EditText && can_modify && crate::object_ui::page_input(ui, &resp, &xf, i, doc, view);
             let on_content = !on_objects && editing_content && can_modify && {
-                crate::content_ui::page_input(ui, &resp, &xf, i, info, &added, tool == QuickTool::AddText, &text_style, view)
+                crate::content_ui::page_input(ui, &resp, &xf, i, info, &added, tool == QuickTool::AddText, &text_style, view, drop_target)
                     || tool == QuickTool::AddText
             };
             // Added content owns its gesture; its source text must not queue a second edit.
@@ -3044,6 +3044,18 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             let delta = ui.input_mut(|input| std::mem::take(&mut input.smooth_scroll_delta));
             if delta != Vec2::ZERO {
                 ui.scroll_with_delta_animation(delta, egui::style::ScrollAnimation::none());
+            }
+        }
+        // Above every page: the image or added item being dragged and the page under the
+        // pointer it would land on (#787). Each page's handlers paint inside the loop, so a
+        // preview or outline reaching the next page would be covered by that page's paper.
+        if let Some(p) = pointer {
+            let moved = crate::edit_text_ui::move_preview(view, info, p).or_else(|| crate::content_ui::move_preview(view, info, &added, p));
+            if let Some((from, preview)) = moved {
+                if let Some((_, txf)) = drop_target.filter(|(t, _)| *t != from) {
+                    painter.rect_stroke(txf.rect, CornerRadius::ZERO, Stroke::new(1.5, crate::content_ui::SELECT_BLUE), egui::StrokeKind::Outside);
+                }
+                painter.rect_stroke(preview, CornerRadius::ZERO, Stroke::new(1.0, crate::content_ui::SELECT_BLUE), egui::StrokeKind::Middle);
             }
         }
         // The page navigated to stays current while no page shows more of itself, so the next

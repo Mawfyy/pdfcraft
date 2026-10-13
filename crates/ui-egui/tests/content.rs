@@ -68,6 +68,83 @@ fn texts(h: &Harness<'static, PdfCraftApp>) -> Vec<String> {
         .collect()
 }
 
+/// A two-page 300 × 400 document (#787).
+fn two_pages() -> Vec<u8> {
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 400] >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    out
+}
+
+#[test]
+fn an_added_image_drags_onto_the_next_page_and_undo_brings_it_back() {
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("two.pdf", None, two_pages()).unwrap();
+        // Small enough that both pages are on screen.
+        app.set_option("zoom", "50").unwrap();
+        app
+    });
+    h.run_steps(4);
+    // No Add-text tool: add_image opens the Edit a PDF panel itself, as it does for a user
+    // placing a picture from the panel, and the drag must work with the plain Select tool.
+    // A 30 × 20 image lands centred on page 1: [135, 190, 165, 210].
+    let mut png = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut png, 30, 20);
+        enc.set_color(png::ColorType::Rgb);
+        let mut w = enc.write_header().unwrap();
+        w.write_image_data(&[200u8, 40, 40].repeat(600)).unwrap();
+    }
+    h.state_mut().add_image("logo.png".into(), png);
+    h.run_steps(3);
+    assert_eq!(added(&h).len(), 1);
+    let r0 = h.state().views[0].page_screen_rect(0).expect("page 1 on screen");
+    let r1 = h.state().views[0].page_screen_rect(1).expect("page 2 on screen");
+    // Drag from the picture to the middle of page 2 (#787).
+    let from = r0.center();
+    let to = r1.center();
+    h.hover_at(from);
+    h.run_steps(1);
+    h.drag_at(from);
+    h.run_steps(1);
+    for k in 1..=4 {
+        h.hover_at(from + (to - from) * (k as f32 / 4.0));
+        h.run_steps(1);
+    }
+    h.drop_at(to);
+    h.run_steps(4);
+    {
+        let a = added(&h);
+        assert_eq!(a.len(), 1, "still one item");
+        assert_eq!(a[0].page, 1, "it landed on page 2");
+        let r = a[0].content.rect();
+        assert!(r.iter().zip([135.0, 190.0, 165.0, 210.0]).all(|(x, y)| (x - y).abs() < 3.0), "centred on page 2: {r:?}");
+        let s = h.state();
+        assert_eq!(s.session.get(s.views[0].id).unwrap().can_undo(), Some("Move content"));
+    }
+    // One undo step puts it back.
+    h.state_mut().execute("edit.undo");
+    h.run_steps(4);
+    assert_eq!(added(&h)[0].page, 0, "back on page 1");
+}
+
 #[test]
 fn clicking_elsewhere_keeps_the_text_and_starts_a_new_box() {
     // #74: a click elsewhere on the page threw away the text being typed and opened a new box.
