@@ -1067,7 +1067,8 @@ fn ctrl_dragging_a_thumbnail_through_the_control_channel_copies_the_page() {
         [f(0), f(1), f(2), f(3)]
     };
     let (a, b) = (cell(&mut h, &c, 1), cell(&mut h, &c, 3));
-    let copy = if cfg!(target_os = "macos") { "alt" } else { "ctrl" };
+    // The gesture reads the OS the context reports: Option on macOS, Ctrl elsewhere.
+    let copy = if h.ctx.os() == egui::os::OperatingSystem::Mac { "alt" } else { "ctrl" };
     ok(
         &mut h,
         &c,

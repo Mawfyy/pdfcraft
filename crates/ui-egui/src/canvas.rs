@@ -4864,8 +4864,11 @@ pub(crate) fn drop_gap(cells: &[(usize, Rect)], p: Pos2) -> Option<usize> {
 
 /// Ctrl (Option on macOS) held when a page drag drops copies the dragged pages into the gap
 /// instead of moving them, as Acrobat's Organize Pages does.
-fn copy_modifier(m: &egui::Modifiers) -> bool {
-    if cfg!(target_os = "macos") { m.alt } else { m.ctrl }
+///
+/// The OS comes from the context, not `cfg!`: the wasm build runs on macOS too, where
+/// `cfg!(target_os = "macos")` is false, so Option has to copy there as well (#3092 review).
+fn copy_modifier(ctx: &egui::Context, m: &egui::Modifiers) -> bool {
+    if crate::commands::mac_shortcuts(ctx) { m.alt } else { m.ctrl }
 }
 
 /// A "+" on a gap of the page grid: insert files there. Returns whether it was clicked.
@@ -5100,7 +5103,7 @@ fn organize_grid(view: &mut DocView, info: &DocInfo, editable: bool, dirty: bool
         // While dragging: the gap the pages would go to, drawn as a bar.
         if let (Some(pages), Some(p)) = (view.org_drag.clone(), ui.input(|i| i.pointer.hover_pos())) {
             // Ctrl (Option on macOS) held over the drop copies the pages; see #2997.
-            let copying = copy_modifier(&ui.input(|i| i.modifiers));
+            let copying = copy_modifier(ui.ctx(), &ui.input(|i| i.modifiers));
             if let Some(gap) = drop_gap(&cells, p) {
                 let x = match cells.iter().find(|(i, _)| *i == gap) {
                     Some((_, r)) => r.left() + 3.0,
