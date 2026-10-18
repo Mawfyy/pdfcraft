@@ -3867,6 +3867,58 @@ fn one_editor_contains_mixed_styles_and_visual_rows() {
     assert_eq!(h.state().session.get(h.state().views[0].id).unwrap().text_blocks(0)[0].rows.len(), 3);
 }
 
+#[test]
+fn the_caret_on_a_small_row_is_as_tall_as_that_row() {
+    // It was one row of the region's first (18 pt) size tall, reaching into the row below.
+    let bytes = source_font_fixture_with_text(
+        "BT 0 0.2 0.5 rg /F1 1 Tf 18 0 0 18 20 240 Tm (Heading) Tj ET \
+         BT 0 g /F2 12 Tf 20 215 Td (Plain ) Tj /F1 12 Tf 0 0.2 0.5 rg (bold) Tj /F2 12 Tf 0 g ( words) Tj ET \
+         BT /F2 10 Tf 20 195 Td (Last row) Tj ET",
+    );
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("mixed.pdf", None, bytes).unwrap();
+        app
+    });
+    h.run_steps(4);
+    assert!(h.state_mut().execute("edit.edit_text"));
+    h.run_steps(2);
+    let page = h.state().views[0].page_screen_rect(0).unwrap();
+    let k = page.width() / 300.0;
+    let screen = |x: f32, y: f32| egui::pos2(page.left() + x * k, page.top() + (300.0 - y) * k);
+    let click = |h: &mut Harness<'static, PdfCraftApp>, at: egui::Pos2| {
+        h.hover_at(at);
+        h.run_steps(1);
+        h.drag_at(at);
+        h.run_steps(1);
+        h.drop_at(at);
+        h.run_steps(4);
+    };
+    click(&mut h, screen(30.0, 245.0));
+    assert!(h.state().views[0].line_editor.is_some(), "the region opens");
+    let row = h.state().session.get(h.state().views[0].id).unwrap().text_lines(0).into_iter().find(|l| l.text == "Last row").unwrap().rect;
+    click(&mut h, screen(40.0, ((row[1] + row[3]) / 2.0) as f32));
+    let row_height = (row[3] - row[1]) as f32 * k;
+    let (left, right) = (screen(row[0] as f32, 0.0).x - 2.0, screen(row[2] as f32, 0.0).x + 2.0);
+    let middle = screen(0.0, ((row[1] + row[3]) / 2.0) as f32).y;
+    // The caret: a vertical segment within the row's span, through its middle.
+    let caret = h
+        .output()
+        .shapes
+        .iter()
+        .find_map(|s| match &s.shape {
+            egui::Shape::LineSegment { points: [a, b], .. }
+                if (a.x - b.x).abs() < 0.01 && (left..right).contains(&a.x) && a.y.min(b.y) < middle && a.y.max(b.y) > middle =>
+            {
+                Some((b.y - a.y).abs())
+            }
+            _ => None,
+        })
+        .expect("a caret on the last row");
+    assert!(caret > row_height * 0.8 && caret < row_height + 4.0, "caret {caret} px on a {row_height} px row");
+}
+
 /// Opt-in private-document regression. This never captures images or saves the source file.
 /// Run with PDFCRAFT_TEXT_REGRESSION_PDF=/path/to/document.pdf and --ignored.
 #[test]
@@ -4759,4 +4811,33 @@ fn leaving_organize_goes_back_to_the_workspace_panel() {
     h.state_mut().views[0].organize = false;
     h.run_steps(3);
     assert_eq!(h.state().left, LeftPanel::AllTools);
+}
+
+/// The Read mode command (not the mode bar) applies a paragraph still open in the editor, as
+/// putting the Edit text tool down does; left open, it would stay drawn in Read mode with no tool.
+#[test]
+fn read_mode_shortcut_applies_the_open_paragraph() {
+    use pdfcraft_ui_egui::{Mode, QuickTool};
+    let mut h = harness(1, |_| {});
+    assert!(h.state_mut().execute("edit.edit_text"));
+    h.run_steps(2);
+    // The line "Page 1" sits at (20, 150) on a 200 × 300 page, 24 pt.
+    let r = h.state().views[0].page_screen_rect(0).expect("on screen");
+    let at = egui::pos2(r.left() + 40.0 / 200.0 * r.width(), r.top() + (300.0 - 158.0) / 300.0 * r.height());
+    h.hover_at(at);
+    h.run_steps(1);
+    h.drag_at(at);
+    h.run_steps(1);
+    h.drop_at(at);
+    h.run_steps(3);
+    assert!(h.state().views[0].line_editor.is_some(), "the line opens for editing");
+    h.state_mut().views[0].line_editor.as_mut().unwrap().text = "Chapter One".into();
+    h.run_steps(1);
+    h.state_mut().run_command("view.read_mode");
+    h.run_steps(3);
+    let s = h.state();
+    assert_eq!(s.mode, Mode::Read);
+    assert_eq!(s.quick_tool, QuickTool::Select);
+    assert!(s.views[0].line_editor.is_none(), "no editor stays open in Read mode");
+    assert_eq!(s.session.get(s.views[0].id).unwrap().text_lines(0)[0].text, "Chapter One", "the edit is applied");
 }
