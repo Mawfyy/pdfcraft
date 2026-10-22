@@ -209,15 +209,17 @@ pub(crate) fn decode_with(
             };
 
             // PdfCraft patch: the work a placement costs is the part of its symbol that lands in
-            // the region; the placements of one region share `MAX_INSTANCE_PIXELS`.
-            let dest_x_start = x.max(0);
-            let dest_x_end = (x + symbol_width).min(region.width as i32);
-            let dest_y_start = y.max(0);
-            let dest_y_end = (y + symbol_height).min(region.height as i32);
+            // the region; the placements of one region share `MAX_INSTANCE_PIXELS`. The bounds
+            // are computed in i64: a placement can sit anywhere in the i32 coordinate space, and
+            // adding a symbol's size to it overflows i32 near its ends.
+            let dest_x_start = i64::from(x).max(0);
+            let dest_x_end = (i64::from(x) + i64::from(symbol_width)).min(i64::from(region.width));
+            let dest_y_start = i64::from(y).max(0);
+            let dest_y_end = (i64::from(y) + i64::from(symbol_height)).min(i64::from(region.height));
             if dest_x_start < dest_x_end && dest_y_start < dest_y_end {
+                // Both differences fit in u32 (the region's dimensions), and their product in u64.
                 written_pixels = written_pixels.saturating_add(
-                    u64::from((dest_x_end - dest_x_start) as u32)
-                        * u64::from((dest_y_end - dest_y_start) as u32),
+                    (dest_x_end - dest_x_start) as u64 * (dest_y_end - dest_y_start) as u64,
                 );
                 if written_pixels > MAX_INSTANCE_PIXELS {
                     bail!(SymbolError::TooManyInstancePixels);
