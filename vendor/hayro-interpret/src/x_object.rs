@@ -844,6 +844,19 @@ fn decode_mask_bytes(
     decode_arr: &[(f32, f32)],
     invert: bool,
 ) -> Option<Vec<u8>> {
+    // PdfCraft patch: a stencil mask has to cover the image it masks. A stream that decoded to
+    // less data than that cannot say where the image is painted: the samples `get_components`
+    // would invent for the missing bytes are zero, which paints. A lenient filter (Flate keeps
+    // what it could decode) therefore looks like a mask that covers everything. Treat it as
+    // unreadable, the way a mask whose decode failed outright is treated.
+    if invert {
+        let row_bits = u64::from(width) * u64::from(bits_per_component);
+        let expected = row_bits.div_ceil(8).saturating_mul(u64::from(*height));
+        if (decoded_data.len() as u64) < expected {
+            return None;
+        }
+    }
+
     let default_decode = color_space.default_decode_arr(bits_per_component as f32);
     let inverted_default = color_space.inverted_default_decode_arr(bits_per_component as f32);
     let fast_path = bits_per_component == 8

@@ -2460,15 +2460,15 @@ mod tests {
     }
 
     /// A page with a red image whose stencil mask is `mask`: the mask is a 1-bit `/ImageMask`
-    /// image of the image's own size, and `broken` gives it data no decoder can read.
-    fn stencil_masked_image_pdf(mask: &str, broken: bool) -> Vec<u8> {
+    /// image of the image's own size. `broken_filter` gives it a decoder and two bytes that
+    /// decoder cannot read.
+    fn stencil_masked_image_pdf(mask: &str, broken_filter: Option<&str>) -> Vec<u8> {
         let body = "q 8 0 0 1 0 0 cm /Im0 Do Q\n";
         let image = "ff0000".repeat(8);
-        let (filter, mask_stream, mask_len) = if broken {
-            // Two bytes are not a JBIG2 stream.
-            ("/JBIG2Decode", "00".to_string(), 2)
-        } else {
-            ("/ASCIIHexDecode", format!("{mask}>"), mask.len() + 1)
+        let (filter, mask_stream, mask_len) = match broken_filter {
+            // Two bytes are not a JBIG2 or a Flate stream.
+            Some(filter) => (filter, "00".to_string(), 2),
+            None => ("/ASCIIHexDecode", format!("{mask}>"), mask.len() + 1),
         };
         format!(
             "%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
@@ -2490,7 +2490,21 @@ mod tests {
     /// light one that way. The image is left out instead, and the failure is reported.
     #[test]
     fn an_image_whose_stencil_mask_cannot_be_decoded_is_not_painted() {
-        let pdf = stencil_masked_image_pdf("00", true);
+        let pdf = stencil_masked_image_pdf("00", Some("/JBIG2Decode"));
+        let mut renderer = PageRenderer::new(Arc::new(pdf), RenderConfig::default());
+        let page = renderer.render(RenderRequest { page: 0, kind: RequestKind::Pixels, scale: 1.0, ..Default::default() });
+        assert!(page.error.is_none(), "{:?}", page.error);
+        assert_eq!((page.width, page.height), (8, 1));
+        assert_eq!(&page.rgba[..4], &[255, 255, 255, 255], "the image was painted without its mask");
+        assert!(page.warnings.contains(&RenderWarning::ImageDecodeFailure), "the lost mask is reported");
+    }
+
+    /// A filter that is lenient about its errors is not a mask either. Flate keeps the bytes it
+    /// could inflate, and the samples it did not produce would be read as zero, which paints:
+    /// the image would cover the page as if it had no mask. Such an image is left out too.
+    #[test]
+    fn a_stencil_mask_whose_flate_data_cannot_be_decoded_is_not_painted() {
+        let pdf = stencil_masked_image_pdf("00", Some("/FlateDecode"));
         let mut renderer = PageRenderer::new(Arc::new(pdf), RenderConfig::default());
         let page = renderer.render(RenderRequest { page: 0, kind: RequestKind::Pixels, scale: 1.0, ..Default::default() });
         assert!(page.error.is_none(), "{:?}", page.error);
@@ -2504,7 +2518,7 @@ mod tests {
     #[test]
     fn a_stencil_mask_that_decodes_still_masks_the_image() {
         for (mask, painted) in [("00", true), ("ff", false)] {
-            let pdf = stencil_masked_image_pdf(mask, false);
+            let pdf = stencil_masked_image_pdf(mask, None);
             let mut renderer = PageRenderer::new(Arc::new(pdf), RenderConfig::default());
             let page = renderer.render(RenderRequest { page: 0, kind: RequestKind::Pixels, scale: 1.0, ..Default::default() });
             assert!(page.error.is_none(), "{:?}", page.error);
